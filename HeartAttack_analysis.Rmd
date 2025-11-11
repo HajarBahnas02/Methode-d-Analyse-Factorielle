@@ -1,0 +1,188 @@
+---
+title: "Analyse ACP complète du dataset HeartAttack.ridk"
+author: "ChatGPT (génération automatique à partir du rapport)"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: cerulean
+    code_folding: show
+  pdf_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# 1. Introduction
+Ce notebook reproduit intégralement les étapes décrites dans le rapport du projet sur l’analyse de risque cardiaque à partir du dataset **HeartAttack.ridk**. 
+L’objectif est d’exécuter une **analyse en composantes principales (ACP)**, puis d’explorer les résultats à travers des visualisations et des modèles simples.
+
+---
+
+# 2. Chargement des packages
+
+```{r packages}
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(tidyverse, FactoMineR, factoextra, psych, caret, broom)
+```
+
+---
+
+# 3. Chargement des données
+
+```{r load-data}
+input_csv <- "HeartAttack.ridk.csv"  # Nom du fichier fourni
+output_csv <- "data_final.csv"
+pca_ncp <- 10
+seed <- 123
+set.seed(seed)
+
+if (!file.exists(input_csv)) {
+  stop(sprintf("Le fichier '%s' est introuvable. Placez-le dans le répertoire courant et relancez.", input_csv))
+}
+
+data_raw <- read.csv(input_csv, stringsAsFactors = FALSE, na.strings = c("", "NA", "NaN"))
+cat("Dimensions du dataset :", dim(data_raw)[1], "lignes x", dim(data_raw)[2], "colonnes\n")
+```
+
+---
+
+# 4. Prétraitement et nettoyage
+
+```{r cleaning}
+cols_to_remove <- c("Country", "Continent", "Hemisphere")
+data <- data_raw %>% select(-any_of(cols_to_remove))
+
+clean_names <- function(x) {
+  x %>% str_replace_all("[[:space:]]+", "_") %>% str_replace_all("\\.", "_") %>% str_replace_all("[^A-Za-z0-9_\\-]", "")
+}
+colnames(data) <- clean_names(colnames(data))
+
+if ("Sex" %in% colnames(data)) {
+  data <- data %>% mutate(Sex = case_when(
+    Sex %in% c("Male", "male", "M", "m", 0, "0") ~ 0,
+    Sex %in% c("Female", "female", "F", "f", 1, "1") ~ 1,
+    TRUE ~ as.numeric(NA)
+  ))
+}
+
+if ("Diet" %in% colnames(data)) {
+  data <- data %>% mutate(Diet = case_when(
+    Diet %in% c("Healthy", "healthy") ~ 2,
+    Diet %in% c("Average", "average") ~ 1,
+    Diet %in% c("Unhealthy", "unhealthy") ~ 0,
+    TRUE ~ as.numeric(NA)
+  ))
+}
+
+binary_cols <- c("Diabetes", "Family_History", "Smoking", "Obesity", "Alcohol_Consumption", "Previous_Heart_Problems", "Medication_Use")
+for (col in intersect(binary_cols, colnames(data))) {
+  data[[col]] <- case_when(
+    data[[col]] %in% c(0, "0", "No", "no", "Non", "non", "False", "FALSE") ~ 0,
+    data[[col]] %in% c(1, "1", "Yes", "yes", "Oui", "oui", "True", "TRUE") ~ 1,
+    TRUE ~ as.numeric(NA)
+  )
+}
+
+if ("Blood_Pressure" %in% colnames(data)) {
+  bp_split <- str_split_fixed(as.character(data$Blood_Pressure), "/", 2)
+  data$BP_Systolic <- as.numeric(bp_split[,1])
+  data$BP_Diastolic <- as.numeric(bp_split[,2])
+  data <- data %>% select(-Blood_Pressure)
+}
+
+convert_numeric_candidates <- function(df) {
+  for (cname in colnames(df)) {
+    if (is.character(df[[cname]])) {
+      possible_num <- suppressWarnings(as.numeric(df[[cname]]))
+      non_na_ratio <- mean(!is.na(possible_num))
+      if (non_na_ratio >= 0.8) df[[cname]] <- possible_num
+    }
+  }
+  df
+}
+data <- convert_numeric_candidates(data)
+
+num_cols <- names(select_if(data, is.numeric))
+for (col in num_cols) {
+  med <- median(data[[col]], na.rm = TRUE)
+  data[[col]][is.na(data[[col]])] <- med
+}
+```
+
+---
+
+# 5. Analyse en Composantes Principales (ACP)
+
+```{r pca}
+target_col <- intersect(c("Heart_Attack_Risk", "Heart.Attack.Risk", "HeartAttackRisk"), colnames(data))[1]
+
+vars_for_pca <- data %>% select(where(is.numeric)) %>% select(-all_of(target_col))
+vars_scaled <- scale(vars_for_pca)
+
+res.pca <- PCA(vars_scaled, scale.unit = FALSE, ncp = pca_ncp, graph = FALSE)
+summary(res.pca)
+```
+
+---
+
+# 6. Graphiques principaux
+
+```{r plots, fig.width=8, fig.height=6}
+fviz_eig(res.pca, addlabels = TRUE)
+fviz_pca_var(res.pca, col.var = "contrib", repel = TRUE, axes = c(1,2))
+```
+
+---
+
+# 7. Construction du dataset final
+
+```{r final-dataset}
+ind_coords <- as.data.frame(res.pca$ind$coord)
+data_final <- bind_cols(as.data.frame(vars_scaled), ind_coords[,1:2])
+colnames(data_final)[(ncol(data_final)-1):ncol(data_final)] <- c("Dim.1", "Dim.2")
+
+if (!is.null(target_col)) {
+  data_final <- bind_cols(data_final, tibble(!!target_col := data[[target_col]]))
+}
+write.csv(data_final, output_csv, row.names = FALSE)
+head(data_final)
+```
+
+---
+
+# 8. Clustering et Modélisation
+
+```{r clustering-model}
+kmeans_res <- kmeans(data_final %>% select(Dim.1, Dim.2), centers = 3, nstart = 50)
+data_final$Cluster <- as.factor(kmeans_res$cluster)
+
+fviz_cluster(kmeans_res, data_final[, c("Dim.1", "Dim.2")], geom = "point", ellipse.type = "convex")
+
+if (!is.null(target_col)) {
+  data_final[[target_col]] <- as.numeric(as.character(data_final[[target_col]]))
+  glm_fit <- glm(as.formula(paste(target_col, "~ Dim.1 + Dim.2")), data = data_final, family = binomial)
+  summary(glm_fit)
+}
+```
+
+---
+
+# 9. Conclusion
+Ce notebook **HeartAttack.ridk** permet de réaliser un pipeline complet d’analyse :
+1. Prétraitement et normalisation des données.
+2. Analyse en composantes principales (ACP) avec visualisation.
+3. Enrichissement du jeu de données avec les dimensions principales.
+4. Exploration de la structure via **k-means** et **régression logistique**.
+
+Les fichiers exportés contiennent :
+- `data_final.csv` (dataset enrichi)
+- `pca_eigenvalues.csv` (valeurs propres)
+- `scree_plot.png`, `correlation_circle_dim1_dim2.png` (visualisations)
+
+Fin du notebook ✅
