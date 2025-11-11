@@ -21,3 +21,4 @@ Le pipeline comprend le **prétraitement des données**, l’**ACP**, le **clust
 - Packages R nécessaires :
   ```r
   install.packages(c("pacman", "FactoMineR", "factoextra", "tidyverse", "psych", "caret", "broom"))
+<img width="944" height="760" alt="image" src="https://github.com/user-attachments/assets/6e2527c7-52fd-4c47-bbc4-359af4d85aa4" />
